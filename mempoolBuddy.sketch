@@ -1,0 +1,368 @@
+
+#include <Arduino.h>
+#include <TFT_eSPI.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+
+// Define the TFT_eSPI object
+TFT_eSPI tft = TFT_eSPI();
+
+// Define the maximum number of API URLs that can be cached
+#define MAX_URLS 10
+
+// Define an array to store the API URLs and their cached JSON responses
+String apiUrls[MAX_URLS];
+String apiResponses[MAX_URLS];
+
+// Define a function to retrieve data from an API URL and cache the JSON response
+String getApiResponse(String apiUrl) {
+  // Check if the API URL is already cached
+  for (int i = 0; i < MAX_URLS; i++) {
+    if (apiUrls[i] == apiUrl) {
+      // Return the cached JSON response
+      return apiResponses[i];
+    }
+  }
+  
+  // If the API URL is not cached, retrieve the JSON response
+  HTTPClient http;
+  http.begin(apiUrl);
+  int httpCode = http.GET();
+  String jsonResponse = "";
+  if (httpCode == HTTP_CODE_OK) {
+    jsonResponse = http.getString();
+    // Cache the API URL and JSON response
+    for (int i = 0; i < MAX_URLS; i++) {
+      if (apiUrls[i] == "") {
+        apiUrls[i] = apiUrl;
+        apiResponses[i] = jsonResponse;
+        break;
+      }
+    }
+  }
+  http.end();
+  
+  // Return the JSON response
+  return jsonResponse;
+}
+
+// Define the maximum number of projected and completed blocks to display
+int maxProjectedBlocks = 3;
+int maxCompletedBlocks = 3;
+
+// Define an array to store the projected blocks data
+int projectedBlockCounts[500];
+int projectedBlockFees[500];
+int projectedBlockSizes[500];
+int projectedBlockTxCounts[500];
+int projectedBlockEstimates[500];
+
+// Define an array to store the completed blocks data
+int completedBlockHeights[500];
+int completedBlockSatsVb[500];
+int completedBlockSizes[500];
+int completedBlockTxCounts[500];
+String completedBlockTimestamps[500];
+
+// Constants
+const uint8_t kButton1Pin = 34;
+const uint8_t kButton2Pin = 35;
+const uint16_t kCubeAnimationDelay = 100;
+const uint16_t kCubeAnimationSteps = 10;
+const uint16_t kCubeWidth = 10;
+const uint16_t kCubeDepth = 10;
+const uint16_t kCubeHeight = 40;
+const uint16_t kCubePadding = 2;
+const uint16_t kDisplayWidth = 240;
+const uint16_t kDisplayHeight = 135;
+const uint16_t kDisplayPadding = 5;
+const uint16_t kBorderColor = TFT_BLUE;
+const uint16_t kBackgroundColor = TFT_NAVY;
+const uint16_t kProjectedCubeGradientStartColor = TFT_GREEN;
+const uint16_t kProjectedCubeGradientEndColor = TFT_RED;
+const uint8_t kMaxBlocksToDisplay = 3;
+const uint32_t kCacheDuration = 300000; // Cache duration in ms (5 minutes)
+
+// Variables
+char *apiUrls[] = {
+  "https://mempool.space/api/v1/fees/mempool-blocks",
+  "https://mempool.space/api/v1/blocks/"
+};
+char *apiResponses[2];
+uint32_t cacheTimestamps[2] = {0, 0};
+int16_t currentDisplay = 0;
+int16_t previousDisplay = -1;
+int16_t displayCount = 0;
+DynamicJsonDocument projectedBlocksDoc(2048);
+DynamicJsonDocument completedBlocksDoc(4096);
+
+// Functions
+void updateApiData(int16_t index) {
+  // Check if data for this index has been cached
+  if (apiCache[index].length() > 0) {
+    // If cached data exists, parse the JSON data from cache
+    parseApiData(apiCache[index], index);
+  } else {
+    // If no cached data exists, query the API and cache the JSON response
+    String apiData = getApiResponse(apiUrls[index]);
+    if (apiData.length() > 0) {
+      apiCache[index] = apiData;
+      parseApiData(apiData, index);
+    }
+  }
+}
+
+// Function to update the display
+void updateDisplay() {
+  // Handle button press events
+  handleButtonPress();
+
+  // Check if enough time has passed since the last button press to update the display
+  if (millis() - lastButtonPressTime >= BUTTON_PRESS_UPDATE_INTERVAL) {
+    // Update the current display
+    switch (currentDisplay) {
+      case BLOCK_TRAIN_DISPLAY:
+        updateProjectedBlocksData();
+        updateCompletedBlocksData();
+        drawProjectedBlocks();
+        drawCompletedBlocks();
+        break;
+      case UNCONFIRMED_TRANSACTIONS_DISPLAY:
+        updateUnconfirmedTransactionsData();
+        drawUnconfirmedTransactions();
+        break;
+      case ESTIMATED_FEES_DISPLAY:
+        updateEstimatedFeesData();
+        drawEstimatedFees();
+        break;
+    }
+  }
+}
+
+void updateProjectedBlocksData() {
+  String api_url = api_urls[0];
+  String cached_json = getCache(api_url);
+
+  if (cached_json == "") {
+    String json = httpGETRequest(api_url);
+    if (json != "") {
+      setCache(api_url, json);
+      cached_json = json;
+    }
+  }
+
+  if (cached_json != "") {
+    DynamicJsonDocument doc(JSON_ARRAY_SIZE(500));
+    DeserializationError error = deserializeJson(doc, cached_json);
+    if (error) {
+      Serial.print(F("deserializeJson() failed: "));
+      Serial.println(error.c_str());
+      return;
+    }
+
+    projected_blocks.clear();
+
+    for (int i = 0; i < min(doc.size(), (size_t)projected_blocks_count); i++) {
+      JsonObject block = doc[i];
+      uint16_t median_fee = block["median_fee"].as<uint16_t>();
+      uint32_t size = block["size"].as<uint32_t>();
+      uint32_t vsize = block["vsize"].as<uint32_t>();
+      uint32_t weight = block["weight"].as<uint32_t>();
+      uint16_t fee_range_percentile = block["fee_range_percentiles"]["10"].as<uint16_t>();
+      uint16_t tx_count = block["tx_count"].as<uint16_t>();
+      uint32_t eta = block["eta"].as<uint32_t>();
+      projected_blocks.push_back({median_fee, size, vsize, weight, fee_range_percentile, tx_count, eta});
+    }
+  }
+}
+
+// Draw a block cube face
+void drawCubeFace(int x, int y, int z, int color, String text) {
+  tft.pushRotatedCanvas(x, y, z, 0, 0, 0, CUBE_SIZE, CUBE_SIZE, CUBE_SIZE, 0);
+  tft.fillScreen(color);
+  if (text != "") {
+    drawTextOnCube(0, 0, CUBE_SIZE, text);
+  }
+  tft.popCanvas();
+}
+
+void updateCompletedBlocksData() {
+  // check if cache is still valid
+  if (millis() - cacheCompletedBlocksTime < cacheTimeout) {
+    return;
+  }
+  
+  // update cache time
+  cacheCompletedBlocksTime = millis();
+  
+  // update the data
+  for (int i = 0; i < numCompletedBlocks; i++) {
+    // get the API data for the block at the specified index
+    String url = completedBlocksUrls[i] + "?limit=" + String(blockLimit);
+    String json = getCachedApiData(url, cacheCompletedBlocks[i]);
+    if (json == "") continue; // skip if unable to get data
+    
+    // parse the JSON data
+    DynamicJsonDocument doc(2048);
+    deserializeJson(doc, json);
+    
+    // update the block data
+    String height = doc[0]["height"].as<String>();
+    String satsVb = doc[0]["sats_vb"].as<String>();
+    String feeRange = doc[0]["fee_range"].as<String>();
+    String size = doc[0]["size"].as<String>();
+    String txCount = doc[0]["tx_count"].as<String>();
+    uint32_t timestamp = doc[0]["timestamp"].as<uint32_t>();
+    
+    completedBlocksData[i].height = height;
+    completedBlocksData[i].satsVb = satsVb;
+    completedBlocksData[i].feeRange = feeRange;
+    completedBlocksData[i].size = size;
+    completedBlocksData[i].txCount = txCount;
+    completedBlocksData[i].timestamp = timestamp;
+  }
+}
+
+void drawProjectedBlockCube(uint8_t index, JsonObject blockData) {
+  // Calculate cube dimensions and position
+  uint16_t x = 5 + index * (CUBE_SIZE + CUBE_SPACING);
+  uint16_t y = 35;
+  uint16_t z = 0;
+  uint16_t width = CUBE_SIZE;
+  uint16_t height = CUBE_SIZE;
+  uint16_t depth = CUBE_SIZE;
+
+  // Calculate color gradient based on median fee
+  float medianFee = blockData["medianFee"].as<float>();
+  uint16_t color = calculateColorGradient(medianFee);
+
+  // Draw cube
+  tft.drawGradientBox(x, y, z, width, height, depth, color, color, GRADIENT_VERTICAL);
+
+  // Draw cube face text
+  String feeRangeText = "Fee Range: " + String(blockData["minFee"].as<float>(), 0) + " - " + String(blockData["maxFee"].as<float>(), 0) + " sats/vB";
+  drawTextOnCube(x, y, z, width, height, depth, feeRangeText);
+  
+  String blockSizeText = "Block Size: " + String(blockData["maxWeight"].as<float>() / 1000, 2) + " KB";
+  drawTextOnCube(x, y, z, width, height, depth, blockSizeText, 1);
+
+  String txCountText = "Tx Count: " + String(blockData["count"].as<uint32_t>());
+  drawTextOnCube(x, y, z, width, height, depth, txCountText, 2);
+
+  float timeEstimate = blockData["time"].as<float>();
+  String timeEstimateText = "ETA: " + String(timeEstimate, 0) + " min";
+  drawTextOnCube(x, y, z, width, height, depth, timeEstimateText, 3);
+
+  // Animate cube if it's the first cube
+  if (index == 0) {
+    animateCube(index, x, y, z, width, height, depth, color);
+  }
+}
+
+void drawCompletedBlockCube(uint8_t index, JsonObject blockData) {
+  // check if blockData is already cached
+  if (completedBlockCache[index].is<JsonObject>()) {
+    blockData = completedBlockCache[index].as<JsonObject>();
+  } else {
+    // cache the blockData for future use
+    completedBlockCache[index] = blockData;
+  }
+
+  // get the color of the block
+  uint16_t color = blockData["color"];
+
+  // get the position and dimensions of the block
+  uint16_t x = blockData["x"];
+  uint16_t y = blockData["y"];
+  uint16_t z = blockData["z"];
+  uint16_t width = blockData["width"];
+  uint16_t height = blockData["height"];
+  uint16_t depth = blockData["depth"];
+
+  // draw the block
+  animateCube(index, x, y, z, width, height, depth, color);
+}
+
+void drawTextOnCube(uint16_t x, uint16_t y, uint16_t z, uint16_t width, uint16_t height, uint16_t depth, const char *text) {
+  uint8_t charIndex = 0;
+  uint8_t charOffset = 0;
+
+  while (text[charIndex]) {
+    charOffset = drawCharOnCube(x + (charIndex * (FONT_WIDTH + 1)), y, z, width, height, depth, text[charIndex], true);
+    charIndex++;
+  }
+}
+
+void animateCube(uint8_t index, uint16_t x, uint16_t y, uint16_t z, uint16_t width, uint16_t height, uint16_t depth, uint16_t color) {
+  for (int i = 0; i < 4; i++) {
+    drawCube(index, x, y, z, width, height, depth, color);
+    delay(100);
+    drawCube(index, x, y, z, width, height, depth, 0);
+    delay(100);
+  }
+}
+
+// Function to handle button press events
+void handleButtonPress() {
+  // Check if button 1 was pressed
+  if (digitalRead(BUTTON_1_PIN) == LOW) {
+    // Go to the next display
+    currentDisplay = (currentDisplay + 1) % DISPLAY_COUNT;
+    lastButtonPressTime = millis();
+  }
+
+  // Check if button 2 was pressed
+  if (digitalRead(BUTTON_2_PIN) == LOW) {
+    // Go to the previous display
+    currentDisplay = (currentDisplay + DISPLAY_COUNT - 1) % DISPLAY_COUNT;
+    lastButtonPressTime = millis();
+  }
+}
+
+void setup() {
+  // Initialize serial communication
+  Serial.begin(115200);
+
+  // Initialize the TFT screen
+  tft.init();
+  tft.setRotation(1);
+  tft.fillScreen(kBackgroundColor);
+
+  // Initialize the button pins as inputs
+  pinMode(kButton1Pin, INPUT_PULLUP);
+  pinMode(kButton2Pin, INPUT_PULLUP);
+
+  // Load initial API data
+  updateApiData(currentDisplay);
+
+  // Draw the border around the screen
+  tft.drawRect(0, 0, kDisplayWidth + (2 * kDisplayPadding), kDisplayHeight + (2 * kDisplayPadding), kBorderColor);
+}
+
+void loop() {
+  // Check if any button is pressed and handle the press
+  handleButtonPress();
+
+  // Update the completed blocks data every 5 minutes
+  if (millis() - lastCompletedBlocksUpdate >= COMPLETED_BLOCKS_UPDATE_INTERVAL) {
+    updateCompletedBlocksData();
+    lastCompletedBlocksUpdate = millis();
+  }
+
+  // Update the projected blocks data every 30 seconds
+  if (millis() - lastProjectedBlocksUpdate >= PROJECTED_BLOCKS_UPDATE_INTERVAL) {
+    updateProjectedBlocksData();
+    lastProjectedBlocksUpdate = millis();
+  }
+
+  // Animate the projected blocks
+  animateProjectedBlocks();
+
+  // Draw the completed blocks
+  drawCompletedBlocks();
+
+  // Draw the projected blocks
+  drawProjectedBlocks();
+}
+
